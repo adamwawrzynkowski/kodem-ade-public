@@ -1,0 +1,10 @@
+# Keeps the pinned commits of the workflows' actions current. Its pull requests change the
+# public repository's copies; port each one to ci/public/ in the source repository, because
+# scripts/ci.sh sync copies those over the public files. Cargo dependencies are updated by
+# hand, because each change needs a license review (licensing/README.md).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
