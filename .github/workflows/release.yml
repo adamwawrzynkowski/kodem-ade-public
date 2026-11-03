@@ -1,0 +1,555 @@
+# Releases Kodem for every platform: checks that changelog/highlights.toml reviewed every change
+# since the previous release, chooses the version, change list and highlights, builds macOS,
+# Windows (x64 and Arm64) and Linux in parallel, and stages one draft release with all of them.
+# Nothing is staged unless every requested build succeeds. Each platform has an update archive,
+# which installed apps download, and an installer for a first installation: a disk image on
+# macOS, a setup program on Windows and a self-extracting script on Linux.
+#
+# Windows builds x64 and Arm64 in two parallel jobs, because one job compiling both took about
+# three times as long as the other platforms.
+#
+# Start it with Run workflow here, or with Build Release Nightly / Production on your computer
+# (scripts/release.sh), which follows its progress and then publishes the draft. A ruleset
+# reserves release tags for the owner's accounts, so after Run workflow, publish the draft on
+# the Releases page; that creates the tag.
+#
+# The source repository is private. This workflow runs in the public release repository, where
+# GitHub Actions is free, and checks out the source with KODEM_SOURCE_TOKEN. The copy in the source
+# repository, ci/public/.github/workflows/release.yml, is the one to edit; scripts/ci.sh sync
+# copies it here. The job's own token writes the draft release to this repository.
+#
+# Who can run it: only the repository's owner. Plan requires that the owner triggered the run, and
+# every other job needs Plan, so a collaborator's run or re-run builds nothing. Every secret
+# belongs to an environment that only the main branch can use, and only the owner can push to main
+# (the Main ruleset), so a workflow on another branch or in a fork gets no secret.
+# scripts/ci.sh configure sets this up:
+#   Environments release and macos-signing (main only), with the secret
+#     KODEM_SOURCE_TOKEN                        a fine-grained token of the owner that may read
+#                                               the contents of the source repository only
+#   Variable  KODEM_CI_LOG_CERTIFICATE          the certificate that the build logs are encrypted to
+#
+# Anyone can read this repository's run logs, so scripts/ci-step.sh runs every build step and
+# keeps its output out of the log: it encrypts the output to KODEM_CI_LOG_CERTIFICATE, and each job
+# uploads the encrypted logs as an artifact. scripts/ci.sh logs RUN decrypts them.
+#
+# Optional configuration in the repository's Actions settings:
+#   Secrets of the release environment
+#            SIGNPATH_API_TOKEN                               SignPath CI user's API token
+#            KODEM_SIGN_PFX_BASE64, KODEM_SIGN_PFX_PASSWORD   Authenticode certificate (.pfx, base64)
+#            KODEM_GPG_PRIVATE_KEY, KODEM_GPG_PASSPHRASE      OpenPGP key for the Linux .asc signatures
+#   Variables SIGNPATH_ORGANIZATION_ID                        turns on signing with SignPath
+#             SIGNPATH_PROJECT_SLUG, SIGNPATH_SIGNING_POLICY_SLUG
+#             KODEM_GPG_KEY                                   that key's ID or fingerprint
+#             KODEM_REQUIRE_SIGNING=1                         refuses unsigned Windows executables
+# SignPath signs the Windows executables, then the installers that hold them, with the artifact
+# configurations `executables` and `installers` (.signpath/artifact-configurations/). Its trusted
+# build system must name this repository. Otherwise a .pfx certificate signs them. Without
+# either, Windows executables are unsigned.
+#
+# macOS releases are signed with Developer ID and notarized, or the macOS job fails. Its secrets
+# belong to the macos-signing environment; scripts/configure-macos-signing.sh creates it and
+# sets them:
+#   KODEM_MACOS_CERTIFICATE_P12_BASE64, KODEM_MACOS_CERTIFICATE_PASSWORD
+#                                         the Developer ID Application identity (.p12, base64)
+#   KODEM_MACOS_PROFILE_PRODUCTION_BASE64, KODEM_MACOS_PROFILE_NIGHTLY_BASE64
+#                                         Developer ID provisioning profiles (optional; without
+#                                         one, that channel has no iCloud Keychain pairing)
+#   KODEM_NOTARY_APPLE_ID, KODEM_NOTARY_PASSWORD
+#                                         the Apple ID and app-specific password of notarization
+# The certificate reaches a keychain only after the build (scripts/build-macos.sh).
+name: Release packages
+run-name: Release ${{ inputs.channel }}${{ inputs.request && format(' · {0}', inputs.request) || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        required: true
+        type: choice
+        options: [nightly, production]
+      commit:
+        description: Commit to release (empty for the newest commit of the branch)
+        required: false
+        type: string
+      version:
+        description: Version (X.Y, such as 0.61; empty for the next version)
+        required: false
+        type: string
+      platforms:
+        description: Platforms to build
+        required: true
+        default: macos windows linux
+        type: string
+      request:
+        description: Set by scripts/release.sh to find this run
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# One release of a channel at a time, so two runs never choose the same version.
+concurrency:
+  group: release-${{ inputs.channel }}
+  cancel-in-progress: false
+
+env:
+  KODEM_CHANNEL: ${{ inputs.channel }}
+  KODEM_RELEASE_PLATFORMS: ${{ inputs.platforms }}
+  KODEM_CI_LOG_CERTIFICATE: ${{ vars.KODEM_CI_LOG_CERTIFICATE }}
+
+jobs:
+  plan:
+    name: Plan
+    # Only the owner's runs build. Every other job needs this one.
+    if: github.triggering_actor == github.repository_owner
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    environment: release
+    # Drafts of this repository count when Plan chooses the version, and only a token that may
+    # write to it sees them.
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      commit: ${{ steps.plan.outputs.commit }}
+      previous: ${{ steps.plan.outputs.previous }}
+      notes: ${{ steps.plan.outputs.notes }}
+      highlights: ${{ steps.plan.outputs.highlights }}
+      history: ${{ steps.plan.outputs.history }}
+    steps:
+      - name: Check the source token and the log certificate
+        env:
+          HAS_SOURCE_TOKEN: ${{ secrets.KODEM_SOURCE_TOKEN != '' }}
+        run: |
+          [[ "$HAS_SOURCE_TOKEN" == true ]] || { echo "::error::The release environment lacks the KODEM_SOURCE_TOKEN secret. Run scripts/ci.sh configure."; exit 1; }
+          [[ -n "$KODEM_CI_LOG_CERTIFICATE" ]] || { echo "::error::The KODEM_CI_LOG_CERTIFICATE variable is missing. Run scripts/ci.sh configure."; exit 1; }
+      # Without a commit, the newest commit of the source repository's default branch.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: adamwawrzynkowski/kodem-ade
+          ref: ${{ inputs.commit }}
+          token: ${{ secrets.KODEM_SOURCE_TOKEN }}
+          persist-credentials: false
+      # Stop before any build if Windows signing is required or half configured, instead of
+      # after an hour of builds.
+      - name: Check Windows signing
+        if: contains(inputs.platforms, 'windows') && (vars.KODEM_REQUIRE_SIGNING == '1' || vars.SIGNPATH_ORGANIZATION_ID != '')
+        env:
+          HAS_CERTIFICATE: ${{ secrets.KODEM_SIGN_PFX_BASE64 != '' }}
+          HAS_SIGNPATH_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+        run: |
+          if [[ -n "$SIGNPATH_ORGANIZATION_ID" ]]; then
+              if [[ "$HAS_SIGNPATH_TOKEN" != true || -z "$SIGNPATH_PROJECT_SLUG" || -z "$SIGNPATH_SIGNING_POLICY_SLUG" ]]; then
+                  echo "::error::SIGNPATH_ORGANIZATION_ID is set, but the SIGNPATH_API_TOKEN secret or the SIGNPATH_PROJECT_SLUG or SIGNPATH_SIGNING_POLICY_SLUG variable is missing."
+                  exit 1
+              fi
+          elif [[ "$HAS_CERTIFICATE" != true ]]; then
+              echo "::error::KODEM_REQUIRE_SIGNING is set, but neither SignPath nor the KODEM_SIGN_PFX_BASE64 secret is configured."
+              exit 1
+          fi
+      - name: Check the highlights and choose the version and the change list
+        id: plan
+        env:
+          # The source repository's commits, highlights and earlier releases.
+          GH_TOKEN: ${{ secrets.KODEM_SOURCE_TOKEN }}
+          # This repository's releases, drafts included.
+          KODEM_RELEASE_TOKEN: ${{ github.token }}
+          KODEM_VERSION: ${{ inputs.version }}
+        run: scripts/ci-step.sh plan scripts/release.sh plan "$KODEM_CHANNEL"
+      - name: Upload the encrypted logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: logs-plan
+          path: ${{ runner.temp }}/kodem-logs/*.p7m
+          if-no-files-found: ignore
+          retention-days: 7
+
+  macos:
+    name: macOS
+    needs: plan
+    if: contains(inputs.platforms, 'macos')
+    # AppKit draws the window controls and other system chrome in the style of the SDK that
+    # the app links against, so the release must link against the macOS 27 SDK.
+    runs-on: xcode-27
+    timeout-minutes: 150
+    # The Developer ID certificate, the provisioning profiles and the notary credentials are
+    # secrets of this environment, which only runs from the main branch. It has the source token
+    # too, because a job has one environment.
+    environment: macos-signing
+    env:
+      KODEM_RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+      KODEM_RELEASE_COMMIT: ${{ needs.plan.outputs.commit }}
+      KODEM_RELEASE_PREVIOUS: ${{ needs.plan.outputs.previous }}
+      KODEM_RELEASE_NOTES: ${{ needs.plan.outputs.notes }}
+      KODEM_RELEASE_HIGHLIGHTS: ${{ needs.plan.outputs.highlights }}
+      KODEM_RELEASE_HISTORY: ${{ needs.plan.outputs.history }}
+      # Releases are signed with Developer ID and notarized, or not built.
+      KODEM_MACOS_REQUIRE_SIGNING: 1
+    steps:
+      - name: Check the signing secrets
+        env:
+          HAS_CERTIFICATE: ${{ secrets.KODEM_MACOS_CERTIFICATE_P12_BASE64 != '' && secrets.KODEM_MACOS_CERTIFICATE_PASSWORD != '' }}
+          HAS_NOTARY: ${{ secrets.KODEM_NOTARY_APPLE_ID != '' && secrets.KODEM_NOTARY_PASSWORD != '' }}
+        run: |
+          [[ "$HAS_CERTIFICATE" == true ]] || { echo "::error::The macos-signing environment lacks KODEM_MACOS_CERTIFICATE_P12_BASE64 or KODEM_MACOS_CERTIFICATE_PASSWORD. Run scripts/configure-macos-signing.sh."; exit 1; }
+          [[ "$HAS_NOTARY" == true ]] || { echo "::error::The macos-signing environment lacks KODEM_NOTARY_APPLE_ID or KODEM_NOTARY_PASSWORD. Run scripts/configure-macos-signing.sh."; exit 1; }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: adamwawrzynkowski/kodem-ade
+          ref: ${{ needs.plan.outputs.commit }}
+          token: ${{ secrets.KODEM_SOURCE_TOKEN }}
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The build cache restores target/, but packages and Code Map runtimes of earlier runs must
+      # not come back: the cache prunes files inside them, the build refuses to replace a bundle it
+      # cannot read, and a pruned runtime that kept its manifest would pass as up to date.
+      - name: Remove packages restored by the cache
+        run: rm -rf "target/$KODEM_CHANNEL" target/codemap-runtime
+      # The license notices need cargo-about; its release binary saves compiling it.
+      - name: Install cargo-about
+        run: scripts/install-cargo-about.sh "$RUNNER_TEMP/cargo-about"
+      - name: Require the macOS 27 SDK
+        run: |
+          sdk_version=$(xcrun --sdk macosx --show-sdk-version)
+          echo "macOS SDK $sdk_version"
+          [[ "${sdk_version%%.*}" -ge 27 ]] || { echo "The release must link against the macOS 27 SDK or newer." >&2; exit 1; }
+      - name: Build the unsigned app
+        run: scripts/ci-step.sh macos-compile scripts/build-macos.sh "$KODEM_CHANNEL" compile
+      # Only after every build script and package installer has run does the certificate come
+      # into a keychain of its own, so that none of them can reach it.
+      - name: Import the signing certificate
+        env:
+          CERTIFICATE: ${{ secrets.KODEM_MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.KODEM_MACOS_CERTIFICATE_PASSWORD }}
+          PROFILE_PRODUCTION: ${{ secrets.KODEM_MACOS_PROFILE_PRODUCTION_BASE64 }}
+          PROFILE_NIGHTLY: ${{ secrets.KODEM_MACOS_PROFILE_NIGHTLY_BASE64 }}
+        run: |
+          umask 077
+          keychain="$RUNNER_TEMP/kodem-signing.keychain-db"
+          password=$(openssl rand -hex 24)
+          security list-keychains -d user | sed 's/^ *"//; s/"$//' > "$RUNNER_TEMP/kodem-keychains.txt"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 10800 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/kodem-signing.p12"
+          security import "$RUNNER_TEMP/kodem-signing.p12" -k "$keychain" -f pkcs12 -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign >/dev/null
+          rm -f "$RUNNER_TEMP/kodem-signing.p12"
+          # The intermediate certificates of Developer ID, which the runner may lack.
+          for authority in DeveloperIDCA DeveloperIDG2CA; do
+              curl -fsSL "https://www.apple.com/certificateauthority/$authority.cer" -o "$RUNNER_TEMP/$authority.cer"
+              security import "$RUNNER_TEMP/$authority.cer" -k "$keychain" >/dev/null 2>&1 || true
+              rm -f "$RUNNER_TEMP/$authority.cer"
+          done
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          xargs security list-keychains -d user -s "$keychain" < "$RUNNER_TEMP/kodem-keychains.txt"
+          profiles="$RUNNER_TEMP/kodem-profiles"
+          mkdir "$profiles"
+          [[ -z "$PROFILE_PRODUCTION" ]] || printf '%s' "$PROFILE_PRODUCTION" | base64 --decode > "$profiles/production.provisionprofile"
+          [[ -z "$PROFILE_NIGHTLY" ]] || printf '%s' "$PROFILE_NIGHTLY" | base64 --decode > "$profiles/nightly.provisionprofile"
+          {
+            echo "KODEM_MACOS_KEYCHAIN=$keychain"
+            echo "KODEM_MACOS_PROFILES=$profiles"
+          } >> "$GITHUB_ENV"
+          [[ -n "$(security find-identity -v -p codesigning "$keychain" | grep 'Developer ID Application')" ]] || { echo "::error::The certificate secret holds no valid Developer ID Application identity."; exit 1; }
+      - name: Sign, notarize and package
+        env:
+          KODEM_NOTARY_APPLE_ID: ${{ secrets.KODEM_NOTARY_APPLE_ID }}
+          KODEM_NOTARY_PASSWORD: ${{ secrets.KODEM_NOTARY_PASSWORD }}
+        run: scripts/ci-step.sh macos-package scripts/build-macos.sh "$KODEM_CHANNEL" package
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/kodem-keychains.txt" ]]; then
+              xargs security list-keychains -d user -s < "$RUNNER_TEMP/kodem-keychains.txt" || true
+          fi
+          security delete-keychain "$RUNNER_TEMP/kodem-signing.keychain-db" 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/kodem-signing.p12" "$RUNNER_TEMP/kodem-profiles" "$RUNNER_TEMP/kodem-keychains.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package-macos
+          path: target/${{ inputs.channel }}/Kodem-macos-*
+          if-no-files-found: error
+          retention-days: 3
+      - name: Upload the encrypted logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: logs-macos
+          path: ${{ runner.temp }}/kodem-logs/*.p7m
+          if-no-files-found: ignore
+          retention-days: 7
+      # The cache's pruning walks every folder under target/ as a Cargo profile and reports
+      # errors for the Python packages of the Code Map runtime.
+      - name: Keep packages out of the cache
+        if: always()
+        run: rm -rf "target/$KODEM_CHANNEL" target/codemap-runtime
+
+  windows:
+    name: Windows ${{ matrix.label }}
+    needs: plan
+    if: contains(inputs.platforms, 'windows')
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            label: x64
+          - arch: aarch64
+            label: Arm64
+    # Visual Studio on this image has the x64 and Arm64 C++ tools and the Windows SDK.
+    runs-on: windows-2022
+    timeout-minutes: 300
+    environment: release
+    # SignPath reads this job and downloads the artifacts that it signs.
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      KODEM_RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+      KODEM_RELEASE_COMMIT: ${{ needs.plan.outputs.commit }}
+      KODEM_RELEASE_PREVIOUS: ${{ needs.plan.outputs.previous }}
+      KODEM_RELEASE_NOTES: ${{ needs.plan.outputs.notes }}
+      KODEM_RELEASE_HIGHLIGHTS: ${{ needs.plan.outputs.highlights }}
+      KODEM_RELEASE_HISTORY: ${{ needs.plan.outputs.history }}
+      KODEM_REQUIRE_SIGNING: ${{ vars.KODEM_REQUIRE_SIGNING }}
+      KODEM_SIGN_PFX_PASSWORD: ${{ secrets.KODEM_SIGN_PFX_PASSWORD }}
+      # SignPath signs between the steps of scripts/build-windows.sh, which then checks its work.
+      KODEM_SIGN_EXTERNALLY: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' && '1' || '0' }}
+      KODEM_WINDOWS_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: adamwawrzynkowski/kodem-ade
+          ref: ${{ needs.plan.outputs.commit }}
+          token: ${{ secrets.KODEM_SOURCE_TOKEN }}
+          persist-credentials: false
+      - name: Import the signing certificate
+        env:
+          CERTIFICATE: ${{ secrets.KODEM_SIGN_PFX_BASE64 }}
+        run: |
+          if [[ -n "$CERTIFICATE" ]]; then
+              certificate="$(cygpath -u "$RUNNER_TEMP")/kodem-signing.pfx"
+              printf '%s' "$CERTIFICATE" | base64 -d > "$certificate"
+              echo "KODEM_SIGN_PFX=$certificate" >> "$GITHUB_ENV"
+          fi
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ${{ matrix.arch }}
+      # The build cache restores target/, but packages and Code Map runtimes of earlier runs must
+      # not come back: the cache prunes files inside them, the build refuses to replace a bundle it
+      # cannot read, and a pruned runtime that kept its manifest would pass as up to date.
+      - name: Remove packages restored by the cache
+        run: rm -rf "target/$KODEM_CHANNEL" target/codemap-runtime
+      - name: Install NSIS
+        run: |
+          source scripts/dependencies.sh
+          kodem_makensis >/dev/null 2>&1 || choco install nsis --yes --no-progress
+      # Voice input builds whisper.cpp with its Vulkan backend for x64.
+      - name: Install the Vulkan SDK
+        run: scripts/install-vulkan-sdk.sh "$RUNNER_TEMP/vulkan"
+      # The license notices need cargo-about; its release binary saves compiling it.
+      - name: Install cargo-about
+        run: scripts/install-cargo-about.sh "$RUNNER_TEMP/cargo-about"
+      - name: Build and sign the executables
+        run: scripts/ci-step.sh windows-compile scripts/build-windows.sh "$KODEM_CHANNEL" compile
+      - name: Collect the executables for SignPath
+        id: executables
+        if: env.KODEM_SIGN_EXTERNALLY == '1'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-executables-${{ matrix.arch }}
+          path: target/${{ inputs.channel }}/windows-*/
+          if-no-files-found: error
+          retention-days: 1
+      # A release signing policy can wait for a person to approve the request.
+      - name: Sign the executables with SignPath
+        if: env.KODEM_SIGN_EXTERNALLY == '1'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: executables
+          github-artifact-id: ${{ steps.executables.outputs.artifact-id }}
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: ${{ runner.temp }}/signed-executables
+      - name: Use the signed executables
+        if: env.KODEM_SIGN_EXTERNALLY == '1'
+        run: cp -R "$(cygpath -u "$RUNNER_TEMP")/signed-executables/." "target/$KODEM_CHANNEL/"
+      - name: Package the update archives and the installers
+        run: scripts/ci-step.sh windows-package scripts/build-windows.sh "$KODEM_CHANNEL" package
+      - name: Collect the installers for SignPath
+        id: installers
+        if: env.KODEM_SIGN_EXTERNALLY == '1'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-installers-${{ matrix.arch }}
+          path: target/${{ inputs.channel }}/Kodem-windows-*-setup.exe
+          if-no-files-found: error
+          retention-days: 1
+      - name: Sign the installers with SignPath
+        if: env.KODEM_SIGN_EXTERNALLY == '1'
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: installers
+          github-artifact-id: ${{ steps.installers.outputs.artifact-id }}
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: ${{ runner.temp }}/signed-installers
+      - name: Use the signed installers
+        if: env.KODEM_SIGN_EXTERNALLY == '1'
+        run: cp "$(cygpath -u "$RUNNER_TEMP")/signed-installers/"Kodem-windows-*-setup.exe "target/$KODEM_CHANNEL/"
+      - name: Write the checksums
+        run: scripts/ci-step.sh windows-finish scripts/build-windows.sh "$KODEM_CHANNEL" finish
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package-windows-${{ matrix.arch }}
+          path: target/${{ inputs.channel }}/Kodem-windows-*
+          if-no-files-found: error
+          retention-days: 3
+      - name: Upload the encrypted logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: logs-windows-${{ matrix.arch }}
+          path: ${{ runner.temp }}/kodem-logs/*.p7m
+          if-no-files-found: ignore
+          retention-days: 7
+      # The cache's pruning walks every folder under target/ as a Cargo profile and reports
+      # errors for the Python packages of the Code Map runtime.
+      - name: Keep packages out of the cache
+        if: always()
+        run: rm -rf "target/$KODEM_CHANNEL" target/codemap-runtime
+      - name: Remove the signing certificate
+        if: always()
+        run: rm -f "$(cygpath -u "$RUNNER_TEMP")/kodem-signing.pfx"
+
+  linux:
+    name: Linux
+    needs: plan
+    if: contains(inputs.platforms, 'linux')
+    # The package needs this glibc (2.35) or newer, which covers current distributions.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    environment: release
+    env:
+      KODEM_RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+      KODEM_RELEASE_COMMIT: ${{ needs.plan.outputs.commit }}
+      KODEM_RELEASE_PREVIOUS: ${{ needs.plan.outputs.previous }}
+      KODEM_RELEASE_NOTES: ${{ needs.plan.outputs.notes }}
+      KODEM_RELEASE_HIGHLIGHTS: ${{ needs.plan.outputs.highlights }}
+      KODEM_RELEASE_HISTORY: ${{ needs.plan.outputs.history }}
+      KODEM_GPG_KEY: ${{ vars.KODEM_GPG_KEY }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: adamwawrzynkowski/kodem-ade
+          ref: ${{ needs.plan.outputs.commit }}
+          token: ${{ secrets.KODEM_SOURCE_TOKEN }}
+          persist-credentials: false
+      - name: Install build libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libfontconfig-dev libfreetype-dev libxcb1-dev libwayland-dev libgtk-3-dev libwebkit2gtk-4.1-dev cmake libclang-dev libasound2-dev libvulkan-dev
+      # Voice input builds whisper.cpp with its Vulkan backend, and Ubuntu 22.04 has no glslc.
+      - name: Install the Vulkan SDK
+        run: scripts/install-vulkan-sdk.sh "$RUNNER_TEMP/vulkan"
+      # The license notices need cargo-about; its release binary saves compiling it.
+      - name: Install cargo-about
+        run: scripts/install-cargo-about.sh "$RUNNER_TEMP/cargo-about"
+      - name: Import the OpenPGP key
+        env:
+          PRIVATE_KEY: ${{ secrets.KODEM_GPG_PRIVATE_KEY }}
+          PASSPHRASE: ${{ secrets.KODEM_GPG_PASSPHRASE }}
+        run: |
+          if [[ -n "$PRIVATE_KEY" ]]; then
+              mkdir -p -m 700 ~/.gnupg
+              printf '%s' "$PRIVATE_KEY" | gpg --batch --import
+              if [[ -n "$PASSPHRASE" ]]; then
+                  printf '%s' "$PASSPHRASE" > ~/.gnupg/kodem-passphrase
+                  chmod 600 ~/.gnupg/kodem-passphrase
+                  printf 'pinentry-mode loopback\npassphrase-file %s\n' ~/.gnupg/kodem-passphrase >> ~/.gnupg/gpg.conf
+              fi
+          fi
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The build cache restores target/, but packages and Code Map runtimes of earlier runs must
+      # not come back: the cache prunes files inside them, the build refuses to replace a bundle it
+      # cannot read, and a pruned runtime that kept its manifest would pass as up to date.
+      - name: Remove packages restored by the cache
+        run: rm -rf "target/$KODEM_CHANNEL" target/codemap-runtime
+      - name: Build and package
+        run: scripts/ci-step.sh linux-build scripts/build-linux.sh "$KODEM_CHANNEL"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package-linux
+          path: target/${{ inputs.channel }}/Kodem-linux-*
+          if-no-files-found: error
+          retention-days: 3
+      - name: Upload the encrypted logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: logs-linux
+          path: ${{ runner.temp }}/kodem-logs/*.p7m
+          if-no-files-found: ignore
+          retention-days: 7
+      # The cache's pruning walks every folder under target/ as a Cargo profile and reports
+      # errors for the Python packages of the Code Map runtime.
+      - name: Keep packages out of the cache
+        if: always()
+        run: rm -rf "target/$KODEM_CHANNEL" target/codemap-runtime
+
+  publish:
+    name: Stage release
+    needs: [plan, macos, windows, linux]
+    # Skipped platforms are allowed; a failed or cancelled build stops publication.
+    if: >-
+      always() && needs.plan.result == 'success'
+      && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    environment: release
+    # It creates the draft in this repository with the job's token; a draft has no tag yet, and
+    # the Release tags ruleset keeps the job's token from creating one.
+    permissions:
+      contents: write
+    env:
+      KODEM_RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+      KODEM_RELEASE_COMMIT: ${{ needs.plan.outputs.commit }}
+      KODEM_RELEASE_STAGE_ONLY: 1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: adamwawrzynkowski/kodem-ade
+          ref: ${{ needs.plan.outputs.commit }}
+          token: ${{ secrets.KODEM_SOURCE_TOKEN }}
+          persist-credentials: false
+      # Outside the checkout, which must stay clean for publication. Only the packages: the
+      # artifacts that SignPath signed hold earlier, unsigned copies.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: package-*
+          path: ${{ runner.temp }}/packages
+      - name: Verify and stage the draft
+        env:
+          GH_TOKEN: ${{ secrets.KODEM_SOURCE_TOKEN }}
+          KODEM_RELEASE_TOKEN: ${{ github.token }}
+        run: |
+          scripts/release.sh publish "$KODEM_CHANNEL" "$RUNNER_TEMP/packages" | tee "$RUNNER_TEMP/stage.log"
+          draft=$(sed -n 's/^STAGED: //p' "$RUNNER_TEMP/stage.log")
+          {
+            echo "### Draft release ready"
+            echo "[Open the draft]($draft) and choose **Publish release**, or run the Build Release command, which publishes it for you."
+          } >> "$GITHUB_STEP_SUMMARY"
