@@ -1,0 +1,184 @@
+# Checks a commit of the private source repository: formatting and Clippy with warnings denied on
+# macOS, Windows and Linux, and the Code Map runtime in codemap/: its Kodem contract tests on all
+# three, and the whole suite on Linux with the tests in codemap/tests/kodem_known_failures.txt
+# deselected. Licenses are checked only by release builds (scripts/licenses.py prepare in the
+# build scripts).
+#
+# The copy in the source repository, ci/public/.github/workflows/checks.yml, is the one to edit;
+# scripts/ci.sh sync copies it to the public repository, where it runs, because GitHub Actions is
+# free there. Start it with scripts/ci.sh check [COMMIT], which follows the run and decrypts the
+# logs of failed steps, or with Run workflow here.
+#
+# Who can run it: only the repository's owner. Every job requires that the owner triggered the
+# run, so a collaborator's run or re-run skips them. The token that reads the source,
+# KODEM_SOURCE_TOKEN, is a secret of the checks environment, which only the main branch can use,
+# and only the owner can push to main (the Main ruleset), so a workflow on another branch or in a
+# fork gets no secret. Nothing runs for pull requests.
+#
+# Anyone can read this repository's run logs, so scripts/ci-step.sh runs every step that prints
+# source code and keeps its output out of the log: it encrypts the output to the certificate in
+# the KODEM_CI_LOG_CERTIFICATE variable, and each job uploads the encrypted logs as an artifact.
+name: Checks
+run-name: Checks ${{ inputs.commit || 'main' }}${{ inputs.request && format(' · {0}', inputs.request) || '' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Commit of the source repository to check (empty for the newest commit of main)
+        required: false
+        type: string
+      request:
+        description: Set by scripts/ci.sh to find this run
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ inputs.commit || 'main' }}
+  cancel-in-progress: true
+
+env:
+  KODEM_CI_LOG_CERTIFICATE: ${{ vars.KODEM_CI_LOG_CERTIFICATE }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  format:
+    name: Format
+    if: github.triggering_actor == github.repository_owner
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    environment: checks
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: adamwawrzynkowski/kodem-ade
+          ref: ${{ inputs.commit }}
+          token: ${{ secrets.KODEM_SOURCE_TOKEN }}
+          persist-credentials: false
+      - run: scripts/ci-step.sh format cargo fmt --all -- --check
+      - name: Upload the encrypted logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: logs-format
+          path: ${{ runner.temp }}/kodem-logs/*.p7m
+          if-no-files-found: ignore
+          retention-days: 7
+
+  clippy:
+    name: Clippy (${{ matrix.os }})
+    if: github.triggering_actor == github.repository_owner
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    environment: checks
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: adamwawrzynkowski/kodem-ade
+          ref: ${{ inputs.commit }}
+          token: ${{ secrets.KODEM_SOURCE_TOKEN }}
+          persist-credentials: false
+      - name: Install build libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libfontconfig-dev libfreetype-dev libxcb1-dev libwayland-dev libgtk-3-dev libwebkit2gtk-4.1-dev libasound2-dev
+      # Voice input builds whisper.cpp with its Vulkan backend on Linux and x64 Windows. CMake
+      # and libclang come with the runner images.
+      - name: Install the Vulkan SDK
+        if: runner.os != 'macOS'
+        run: scripts/install-vulkan-sdk.sh "$RUNNER_TEMP/vulkan"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: scripts/ci-step.sh clippy cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Upload the encrypted logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: logs-clippy-${{ matrix.os }}
+          path: ${{ runner.temp }}/kodem-logs/*.p7m
+          if-no-files-found: ignore
+          retention-days: 7
+
+  codemap-contract:
+    name: Code Map contract (${{ matrix.os }})
+    if: github.triggering_actor == github.repository_owner
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    environment: checks
+    defaults:
+      run:
+        working-directory: codemap
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: adamwawrzynkowski/kodem-ade
+          ref: ${{ inputs.commit }}
+          token: ${{ secrets.KODEM_SOURCE_TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      # uv comes from PyPI, pinned like scripts/dependencies.sh, so that the workflow needs no
+      # action outside GitHub's own.
+      - run: python -m pip install uv==0.12.4
+      - run: ../scripts/ci-step.sh codemap-sync uv sync --frozen --extra mcp
+      - run: ../scripts/ci-step.sh codemap-contract uv run --frozen pytest tests/test_kodem_main.py tests/test_kodem_mcp.py tests/test_kodem_linked.py -q --tb=short
+      - name: Upload the encrypted logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: logs-codemap-contract-${{ matrix.os }}
+          path: ${{ runner.temp }}/kodem-logs/*.p7m
+          if-no-files-found: ignore
+          retention-days: 7
+
+  codemap-suite:
+    name: Code Map suite (ubuntu-22.04)
+    if: github.triggering_actor == github.repository_owner
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    environment: checks
+    defaults:
+      run:
+        working-directory: codemap
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: adamwawrzynkowski/kodem-ade
+          ref: ${{ inputs.commit }}
+          token: ${{ secrets.KODEM_SOURCE_TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install uv==0.12.4
+      - run: ../scripts/ci-step.sh codemap-sync uv sync --frozen --all-extras
+      - name: Run the suite
+        run: |
+          deselect=()
+          while IFS= read -r test; do
+            [[ -z "$test" || "$test" == \#* ]] || deselect+=(--deselect "$test")
+          done < tests/kodem_known_failures.txt
+          ../scripts/ci-step.sh codemap-suite uv run --frozen pytest tests -q --tb=short "${deselect[@]}"
+      - name: Upload the encrypted logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: logs-codemap-suite
+          path: ${{ runner.temp }}/kodem-logs/*.p7m
+          if-no-files-found: ignore
+          retention-days: 7
