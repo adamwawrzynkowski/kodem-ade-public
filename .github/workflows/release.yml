@@ -132,7 +132,7 @@ jobs:
           ref: ${{ needs.plan.outputs.commit }}
           token: ${{ secrets.KODEM_SOURCE_TOKEN }}
           persist-credentials: false
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Remove packages restored by the cache
         run: rm -rf "target/$KODEM_CHANNEL" target/codemap-runtime
       - name: Install cargo-about
@@ -255,7 +255,7 @@ jobs:
               printf '%s' "$CERTIFICATE" | base64 -d > "$certificate"
               echo "KODEM_SIGN_PFX=$certificate" >> "$GITHUB_ENV"
           fi
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.arch }}
       - name: Remove packages restored by the cache
@@ -387,7 +387,7 @@ jobs:
                   printf 'pinentry-mode loopback\npassphrase-file %s\n' ~/.gnupg/kodem-passphrase >> ~/.gnupg/gpg.conf
               fi
           fi
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Remove packages restored by the cache
         run: rm -rf "target/$KODEM_CHANNEL" target/codemap-runtime
       - name: Build and package
