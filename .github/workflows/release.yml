@@ -163,7 +163,7 @@ jobs:
         run: scripts/ci-step.sh plan scripts/release.sh plan "$KODEM_CHANNEL"
       - name: Upload the encrypted logs
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: logs-plan
           path: ${{ runner.temp }}/kodem-logs/*.p7m
@@ -270,7 +270,7 @@ jobs:
           fi
           security delete-keychain "$RUNNER_TEMP/kodem-signing.keychain-db" 2>/dev/null || true
           rm -rf "$RUNNER_TEMP/kodem-signing.p12" "$RUNNER_TEMP/kodem-profiles" "$RUNNER_TEMP/kodem-keychains.txt"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: package-macos
           path: target/${{ inputs.channel }}/Kodem-macos-*
@@ -278,7 +278,7 @@ jobs:
           retention-days: 3
       - name: Upload the encrypted logs
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: logs-macos
           path: ${{ runner.temp }}/kodem-logs/*.p7m
@@ -363,7 +363,7 @@ jobs:
       - name: Collect the executables for SignPath
         id: executables
         if: env.KODEM_SIGN_EXTERNALLY == '1'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-executables-${{ matrix.arch }}
           path: target/${{ inputs.channel }}/windows-*/
@@ -390,7 +390,7 @@ jobs:
       - name: Collect the installers for SignPath
         id: installers
         if: env.KODEM_SIGN_EXTERNALLY == '1'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-installers-${{ matrix.arch }}
           path: target/${{ inputs.channel }}/Kodem-windows-*-setup.exe
@@ -413,7 +413,7 @@ jobs:
         run: cp "$(cygpath -u "$RUNNER_TEMP")/signed-installers/"Kodem-windows-*-setup.exe "target/$KODEM_CHANNEL/"
       - name: Write the checksums
         run: scripts/ci-step.sh windows-finish scripts/build-windows.sh "$KODEM_CHANNEL" finish
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: package-windows-${{ matrix.arch }}
           path: target/${{ inputs.channel }}/Kodem-windows-*
@@ -421,7 +421,7 @@ jobs:
           retention-days: 3
       - name: Upload the encrypted logs
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: logs-windows-${{ matrix.arch }}
           path: ${{ runner.temp }}/kodem-logs/*.p7m
@@ -491,7 +491,7 @@ jobs:
         run: rm -rf "target/$KODEM_CHANNEL" target/codemap-runtime
       - name: Build and package
         run: scripts/ci-step.sh linux-build scripts/build-linux.sh "$KODEM_CHANNEL"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: package-linux
           path: target/${{ inputs.channel }}/Kodem-linux-*
@@ -499,7 +499,7 @@ jobs:
           retention-days: 3
       - name: Upload the encrypted logs
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: logs-linux
           path: ${{ runner.temp }}/kodem-logs/*.p7m
