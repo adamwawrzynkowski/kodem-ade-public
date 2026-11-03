@@ -63,7 +63,7 @@ jobs:
         run: |
           [[ "$HAS_SOURCE_TOKEN" == true ]] || { echo "::error::The release environment lacks the KODEM_SOURCE_TOKEN secret. Run scripts/ci.sh configure."; exit 1; }
           [[ -n "$KODEM_CI_LOG_CERTIFICATE" ]] || { echo "::error::The KODEM_CI_LOG_CERTIFICATE variable is missing. Run scripts/ci.sh configure."; exit 1; }
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: adamwawrzynkowski/kodem-ade
           ref: ${{ inputs.commit }}
@@ -126,7 +126,7 @@ jobs:
         run: |
           [[ "$HAS_CERTIFICATE" == true ]] || { echo "::error::The macos-signing environment lacks KODEM_MACOS_CERTIFICATE_P12_BASE64 or KODEM_MACOS_CERTIFICATE_PASSWORD. Run scripts/configure-macos-signing.sh."; exit 1; }
           [[ "$HAS_NOTARY" == true ]] || { echo "::error::The macos-signing environment lacks KODEM_NOTARY_APPLE_ID or KODEM_NOTARY_PASSWORD. Run scripts/configure-macos-signing.sh."; exit 1; }
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: adamwawrzynkowski/kodem-ade
           ref: ${{ needs.plan.outputs.commit }}
@@ -240,7 +240,7 @@ jobs:
       KODEM_SIGN_EXTERNALLY: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' && '1' || '0' }}
       KODEM_WINDOWS_ARCH: ${{ matrix.arch }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: adamwawrzynkowski/kodem-ade
           ref: ${{ needs.plan.outputs.commit }}
@@ -359,7 +359,7 @@ jobs:
       KODEM_RELEASE_HISTORY: ${{ needs.plan.outputs.history }}
       KODEM_GPG_KEY: ${{ vars.KODEM_GPG_KEY }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: adamwawrzynkowski/kodem-ade
           ref: ${{ needs.plan.outputs.commit }}
@@ -426,7 +426,7 @@ jobs:
       KODEM_RELEASE_COMMIT: ${{ needs.plan.outputs.commit }}
       KODEM_RELEASE_STAGE_ONLY: 1
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: adamwawrzynkowski/kodem-ade
           ref: ${{ needs.plan.outputs.commit }}
